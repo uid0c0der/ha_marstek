@@ -22,7 +22,9 @@ The Marstek integration is an official integration component for Home Assistant 
 
 ```bash
 git clone https://github.com/MarstekEnergy/ha_marstek.git
+
 cd ha_marstek
+
 git checkout marstek-dev
 ```
 
@@ -30,7 +32,7 @@ git checkout marstek-dev
 
 ```bash
 # If using Home Assistant Core (Python virtual environment)
-cp -r /components/marstek /path/to/homeassistant/homeassistant/components/
+cp -r /custom_components/marstek /path/to/homeassistant/config/custom_components/
 
 ```
 
@@ -78,10 +80,11 @@ To update to the latest version:
 ```bash
 # If you kept the cloned repository
 cd /path/to/ha_marstek
+
 git pull origin marstek-dev
 
 # Copy the updated files
-cp -r /components/marstek /path/to/homeassistant/homeassistant/components/
+cp -r /custom_components/marstek /path/to/homeassistant/config/custom_components/
 
 
 ```
