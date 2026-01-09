@@ -32,7 +32,7 @@ git checkout marstek-dev
 
 ```bash
 # If using Home Assistant Core (Python virtual environment)
-cp -r ./custom_components/marstek /path/to/homeassistant/config/custom_components/
+cp -r ./custom_components/marstek /path/to/homeassistant/config/custom_components/marstek
 
 ```
 
