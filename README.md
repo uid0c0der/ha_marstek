@@ -84,7 +84,7 @@ cd /path/to/ha_marstek
 git pull origin marstek-dev
 
 # Copy the updated files
-cp -r ./custom_components/marstek /path/to/homeassistant/config/custom_components/
+cp -r ./custom_components/marstek /path/to/homeassistant/config/custom_components/marstek
 
 
 ```
