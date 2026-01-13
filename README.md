@@ -14,6 +14,32 @@ The Marstek integration is an official integration component for Home Assistant 
 >
 > Marstek devices must have OPEN API enabled
 
+## Quickstart (no existing repo)
+
+If you have not cloned the repository before, follow these steps directly:
+
+```bash
+# 1) Clone the repo (marstek-integration branch)
+git clone https://github.com/MarstekEnergy/home-assistant-core.git
+
+cd core
+
+# 2) Create and activate venv (Python 3.13)
+python3.13 -m venv venv
+
+source venv/bin/activate    # Windows: venv\Scripts\activate
+
+# 3) Install dependencies
+pip install -r requirements.txt -r requirements_test.txt
+
+pip install homeassistant
+
+# 4) Run Home Assistant (uses ./config as your config directory)
+mkir config
+
+hass -c config
+```
+
 ## Installation
 
 ### Method 1: Manual Installation (Recommended)
