@@ -13,6 +13,8 @@ The Marstek integration is an official integration component for Home Assistant 
 > Marstek devices and Home Assistant must be on the same local network
 >
 > Marstek devices must have OPEN API enabled
+>
+> **⚠️ Important**: This integration is currently not compatible with Venus E2.0 devices. Using this integration with Venus E2.0 may cause disconnection between the device and CT003.
 
 ## Quickstart (no existing repo)
 
@@ -122,6 +124,8 @@ cp -r ./custom_components/marstek /path/to/homeassistant/config/custom_component
 1. **Which devices are supported?**
 
    Supports Venus A, Venus D, Venus E 3.0 with new firmware versions, as well as other Marstek devices that support OPEN API communication.
+   
+   **Note**: This integration is currently not compatible with Venus E2.0 devices. Using this integration with Venus E2.0 may cause disconnection between the device and CT003.
 
 2. **Why can't I find my device?**
 
