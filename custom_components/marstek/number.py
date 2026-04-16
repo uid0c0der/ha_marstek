@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from pymarstek import build_command
@@ -16,7 +18,11 @@ from . import MarstekConfigEntry
 from .const import DEFAULT_UDP_PORT, DOMAIN
 from .coordinator import MarstekDataUpdateCoordinator
 
+_LOGGER = logging.getLogger(__name__)
+
 CMD_ES_SET_MODE = "ES.SetMode"
+RETRY_TIMEOUTS = [2.4, 3.2, 4.0, 5.0, 6.0]
+RETRY_BACKOFF_BASES = [0.4, 0.6, 0.8, 1.0, 1.2]
 
 
 def _build_passive_command(power: int) -> str:
@@ -93,26 +99,63 @@ class MarstekPassivePowerNumber(
         return self._value
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set passive power and apply via ES.SetMode."""
+        """Set passive power and apply via ES.SetMode in background."""
         new_value = int(value)
         host = self._config_entry.data.get(CONF_HOST, self._device_info.get("ip", ""))
         if not isinstance(host, str) or not host:
             return
 
+        old_value = self._value
+        self._value = float(new_value)
+        self.async_write_ha_state()
+
+        if self.hass:
+            self.hass.async_create_task(
+                self._async_apply_value(new_value, old_value, host)
+            )
+
+    async def _async_apply_value(
+        self, new_value: int, old_value: float, host: str
+    ) -> None:
+        """Apply passive power with retries and rollback on failure."""
+        success = False
         await self.coordinator.udp_client.pause_polling(host)
         try:
-            await self.coordinator.udp_client.send_request(
-                _build_passive_command(new_value),
-                host,
-                DEFAULT_UDP_PORT,
-                timeout=5.0,
-                quiet_on_timeout=True,
-            )
+            command = _build_passive_command(new_value)
+            for attempt_idx, (timeout, backoff_base) in enumerate(
+                zip(RETRY_TIMEOUTS, RETRY_BACKOFF_BASES, strict=False), start=1
+            ):
+                try:
+                    await self.coordinator.udp_client.send_request(
+                        command,
+                        host,
+                        DEFAULT_UDP_PORT,
+                        timeout=timeout,
+                        quiet_on_timeout=True,
+                    )
+                    success = True
+                    break
+                except (TimeoutError, OSError, ValueError) as err:
+                    _LOGGER.debug(
+                        "Passive power set attempt %d/%d failed for %s: %s",
+                        attempt_idx,
+                        len(RETRY_TIMEOUTS),
+                        host,
+                        err,
+                    )
+                    if attempt_idx >= len(RETRY_TIMEOUTS):
+                        raise
+                    jitter = 0.25 * attempt_idx
+                    await asyncio.sleep(backoff_base * attempt_idx + jitter)
         finally:
             await self.coordinator.udp_client.resume_polling(host)
 
-        self._value = float(new_value)
-        self.async_write_ha_state()
+        if not success:
+            self._value = old_value
+            self.async_write_ha_state()
+            _LOGGER.warning(
+                "Failed to set passive power to %s W for device %s", new_value, host
+            )
         await self.coordinator.async_request_refresh()
 
 
