@@ -129,13 +129,19 @@ class MarstekPassivePowerNumber(
                 zip(RETRY_TIMEOUTS, RETRY_BACKOFF_BASES, strict=False), start=1
             ):
                 try:
-                    await self.coordinator.udp_client.send_request(
+                    response = await self.coordinator.udp_client.send_request(
                         command,
                         host,
                         DEFAULT_UDP_PORT,
                         timeout=timeout,
                         quiet_on_timeout=True,
                     )
+                    result = response.get("result", {}) if isinstance(response, dict) else {}
+                    set_result = (
+                        result.get("set_result") if isinstance(result, dict) else None
+                    )
+                    if set_result is False:
+                        raise ValueError("ES.SetMode returned set_result=false")
                     success = True
                     break
                 except (TimeoutError, OSError, ValueError) as err:

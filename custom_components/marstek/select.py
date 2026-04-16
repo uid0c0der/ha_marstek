@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Any
 
-from pymarstek import build_command
+from pymarstek import build_command, get_es_mode
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import CONF_HOST
@@ -24,6 +24,9 @@ CMD_ES_SET_MODE = "ES.SetMode"
 MODE_OPTIONS = ["Auto", "AI", "Manual", "Passive", "Ups"]
 RETRY_TIMEOUTS = [2.4, 3.2, 4.0]
 RETRY_BACKOFF_BASES = [0.4, 0.6, 0.8]
+VERIFY_ATTEMPTS = 4
+VERIFY_TIMEOUT = 2.4
+VERIFY_DELAY = 0.6
 
 
 def _build_mode_command(mode: str) -> str:
@@ -121,6 +124,7 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
         if not isinstance(host, str) or not host:
             return
 
+        previous_option = self.current_option
         self._optimistic_option = option
         self.async_write_ha_state()
 
@@ -128,10 +132,12 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
             if self._apply_task and not self._apply_task.done():
                 self._apply_task.cancel()
             self._apply_task = self.hass.async_create_task(
-                self._async_apply_mode(option, host)
+                self._async_apply_mode(option, host, previous_option)
             )
 
-    async def _async_apply_mode(self, option: str, host: str) -> None:
+    async def _async_apply_mode(
+        self, option: str, host: str, previous_option: str | None
+    ) -> None:
         """Apply mode change with retries and rollback on failure."""
         success = False
         await self.coordinator.udp_client.pause_polling(host)
@@ -141,15 +147,22 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
                 zip(RETRY_TIMEOUTS, RETRY_BACKOFF_BASES, strict=False), start=1
             ):
                 try:
-                    await self.coordinator.udp_client.send_request(
+                    response = await self.coordinator.udp_client.send_request(
                         command,
                         host,
                         DEFAULT_UDP_PORT,
                         timeout=timeout,
                         quiet_on_timeout=True,
                     )
-                    success = True
-                    break
+                    result = response.get("result", {}) if isinstance(response, dict) else {}
+                    set_result = (
+                        result.get("set_result") if isinstance(result, dict) else None
+                    )
+                    if set_result is False:
+                        raise ValueError("ES.SetMode returned set_result=false")
+                    if await self._verify_mode(option, host):
+                        success = True
+                        break
                 except (TimeoutError, OSError, ValueError) as err:
                     _LOGGER.debug(
                         "Mode change attempt %d/%d failed for %s: %s",
@@ -164,10 +177,36 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
         finally:
             await self.coordinator.udp_client.resume_polling(host)
 
+        if not success and previous_option in MODE_OPTIONS:
+            self._optimistic_option = previous_option
+            self.async_write_ha_state()
         self._optimistic_option = None
         if not success:
             _LOGGER.warning("Failed to apply mode '%s' for device %s", option, host)
         await self.coordinator.async_request_refresh()
+
+    async def _verify_mode(self, expected_option: str, host: str) -> bool:
+        """Verify mode after ES.SetMode."""
+        expected = "UPS" if expected_option == "Ups" else expected_option
+        for _ in range(VERIFY_ATTEMPTS):
+            try:
+                response = await self.coordinator.udp_client.send_request(
+                    get_es_mode(0),
+                    host,
+                    DEFAULT_UDP_PORT,
+                    timeout=VERIFY_TIMEOUT,
+                    quiet_on_timeout=True,
+                )
+            except (TimeoutError, OSError, ValueError):
+                await asyncio.sleep(VERIFY_DELAY)
+                continue
+
+            result = response.get("result", {}) if isinstance(response, dict) else {}
+            mode = result.get("mode") if isinstance(result, dict) else None
+            if isinstance(mode, str) and mode.upper() == expected.upper():
+                return True
+            await asyncio.sleep(VERIFY_DELAY)
+        return False
 
 
 async def async_setup_entry(
