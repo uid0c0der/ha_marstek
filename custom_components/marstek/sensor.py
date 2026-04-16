@@ -330,6 +330,81 @@ class MarstekPVSensor(MarstekSensor):
         return None
 
 
+class MarstekTotalPVPowerSensor(MarstekSensor):
+    """Representation of total PV input power."""
+
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:solar-power"
+
+    def __init__(
+        self,
+        coordinator: MarstekDataUpdateCoordinator,
+        device_info: dict[str, Any],
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
+        """Initialize total PV power sensor."""
+        super().__init__(coordinator, device_info, "total_pv_input_power", config_entry)
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return "Total PV Input Power"
+
+    @property
+    def native_value(self) -> StateType:
+        """Return the sum of PV1..PV4 power in watts."""
+        if not self.coordinator.data:
+            return None
+
+        pv_values: list[float] = []
+        for channel in range(1, 5):
+            value = self.coordinator.data.get(f"pv{channel}_power")
+            if isinstance(value, (int, float)):
+                pv_values.append(float(value))
+
+        if pv_values:
+            return cast(StateType, round(sum(pv_values), 1))
+
+        # Fallback to ES.GetStatus aggregate pv_power if channel values are unavailable.
+        fallback = self.coordinator.data.get("pv_power")
+        if isinstance(fallback, (int, float)):
+            return cast(StateType, float(fallback))
+        return None
+
+
+class MarstekPVAggregatePowerSensor(MarstekSensor):
+    """Representation of PV aggregate power from ES.GetStatus."""
+
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:solar-power"
+
+    def __init__(
+        self,
+        coordinator: MarstekDataUpdateCoordinator,
+        device_info: dict[str, Any],
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
+        """Initialize PV aggregate power sensor."""
+        super().__init__(coordinator, device_info, "pv_power", config_entry)
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return "PV Power (ES)"
+
+    @property
+    def native_value(self) -> StateType:
+        """Return aggregate PV power from ES.GetStatus."""
+        if not self.coordinator.data:
+            return None
+        value = self.coordinator.data.get("pv_power")
+        if isinstance(value, (int, float)):
+            return cast(StateType, float(value))
+        return None
+
+
 class MarstekEnergySensor(MarstekSensor):
     """Representation of a Marstek energy counter sensor."""
 
@@ -404,6 +479,8 @@ async def async_setup_entry(
         for pv_channel in range(1, 5)
         for metric_type in ("power", "voltage", "current", "state")
     )
+    sensors.append(MarstekTotalPVPowerSensor(coordinator, device_info, config_entry))
+    sensors.append(MarstekPVAggregatePowerSensor(coordinator, device_info, config_entry))
     sensors.extend(
         MarstekEnergySensor(
             coordinator, device_info, sensor_type, display_name, config_entry

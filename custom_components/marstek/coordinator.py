@@ -173,6 +173,7 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             es_status_result = es_status_response.get("result", {})
             if isinstance(es_status_result, dict):
                 for key in (
+                    "pv_power",
                     "total_pv_energy",
                     "total_grid_output_energy",
                     "total_grid_input_energy",
