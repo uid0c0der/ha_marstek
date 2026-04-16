@@ -173,6 +173,7 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             es_status_result = es_status_response.get("result", {})
             if isinstance(es_status_result, dict):
                 for key in (
+                    "bat_cap",
                     "pv_power",
                     "total_pv_energy",
                     "total_grid_output_energy",
@@ -191,7 +192,15 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if isinstance(es_mode_response, dict):
             es_mode_result = es_mode_response.get("result", {})
             if isinstance(es_mode_result, dict):
-                for key in ("input_energy", "output_energy"):
+                for key in (
+                    "input_energy",
+                    "output_energy",
+                    "ct_state",
+                    "a_power",
+                    "b_power",
+                    "c_power",
+                    "total_power",
+                ):
                     value = es_mode_result.get(key)
                     if isinstance(value, (int, float)):
                         device_status[key] = value

@@ -448,6 +448,95 @@ class MarstekEnergySensor(MarstekSensor):
         return cast(StateType, round(float(value) / 1000, 3))
 
 
+class MarstekCapacitySensor(MarstekSensor):
+    """Representation of a Marstek battery capacity sensor."""
+
+    _attr_native_unit_of_measurement = "Wh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-high"
+
+    def __init__(
+        self,
+        coordinator: MarstekDataUpdateCoordinator,
+        device_info: dict[str, Any],
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
+        """Initialize capacity sensor."""
+        super().__init__(coordinator, device_info, "bat_cap", config_entry)
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return "Battery Capacity"
+
+    @property
+    def native_value(self) -> StateType:
+        """Return battery capacity in Wh."""
+        if not self.coordinator.data:
+            return None
+        value = self.coordinator.data.get("bat_cap")
+        if isinstance(value, (int, float)):
+            return cast(StateType, int(value))
+        return None
+
+
+class MarstekCTStateSensor(MarstekSensor):
+    """Representation of CT state sensor."""
+
+    _attr_icon = "mdi:counter"
+    _attr_device_class = None
+    _attr_state_class = None
+
+    def __init__(
+        self,
+        coordinator: MarstekDataUpdateCoordinator,
+        device_info: dict[str, Any],
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
+        """Initialize CT state sensor."""
+        super().__init__(coordinator, device_info, "ct_state", config_entry)
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return "CT State"
+
+
+class MarstekMeterPowerSensor(MarstekSensor):
+    """Representation of meter channel power sensor."""
+
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:flash"
+
+    def __init__(
+        self,
+        coordinator: MarstekDataUpdateCoordinator,
+        device_info: dict[str, Any],
+        sensor_type: str,
+        display_name: str,
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
+        """Initialize meter power sensor."""
+        super().__init__(coordinator, device_info, sensor_type, config_entry)
+        self._display_name = display_name
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return self._display_name
+
+    @property
+    def native_value(self) -> StateType:
+        """Return meter power in watts."""
+        if not self.coordinator.data:
+            return None
+        value = self.coordinator.data.get(self._sensor_type)
+        if isinstance(value, (int, float)):
+            return cast(StateType, float(value))
+        return None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: MarstekConfigEntry,
@@ -462,8 +551,10 @@ async def async_setup_entry(
 
     sensors: list[MarstekSensor] = [
         MarstekBatterySensor(coordinator, device_info, config_entry),
+        MarstekCapacitySensor(coordinator, device_info, config_entry),
         MarstekPowerSensor(coordinator, device_info, config_entry),
         MarstekDeviceModeSensor(coordinator, device_info, config_entry),
+        MarstekCTStateSensor(coordinator, device_info, config_entry),
         MarstekBatteryStatusSensor(coordinator, device_info, config_entry),
         MarstekDeviceInfoSensor(coordinator, device_info, "device_ip", config_entry),
         MarstekDeviceInfoSensor(
@@ -481,6 +572,17 @@ async def async_setup_entry(
     )
     sensors.append(MarstekTotalPVPowerSensor(coordinator, device_info, config_entry))
     sensors.append(MarstekPVAggregatePowerSensor(coordinator, device_info, config_entry))
+    sensors.extend(
+        MarstekMeterPowerSensor(
+            coordinator, device_info, sensor_type, display_name, config_entry
+        )
+        for sensor_type, display_name in (
+            ("a_power", "CT A Power"),
+            ("b_power", "CT B Power"),
+            ("c_power", "CT C Power"),
+            ("total_power", "CT Total Power"),
+        )
+    )
     sensors.extend(
         MarstekEnergySensor(
             coordinator, device_info, sensor_type, display_name, config_entry
