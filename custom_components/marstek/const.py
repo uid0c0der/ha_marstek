@@ -10,6 +10,8 @@ DOMAIN: Final = "marstek"
 
 PLATFORMS: Final[list[Platform]] = [
     Platform.SENSOR,
+    Platform.SELECT,
+    Platform.NUMBER,
 ]
 
 # UDP Configuration
