@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
@@ -13,6 +13,7 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
+    UnitOfEnergy,
     UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
@@ -329,6 +330,49 @@ class MarstekPVSensor(MarstekSensor):
         return None
 
 
+class MarstekEnergySensor(MarstekSensor):
+    """Representation of a Marstek energy counter sensor."""
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:lightning-bolt"
+
+    def __init__(
+        self,
+        coordinator: MarstekDataUpdateCoordinator,
+        device_info: dict[str, Any],
+        sensor_type: str,
+        display_name: str,
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
+        """Initialize the energy sensor."""
+        super().__init__(coordinator, device_info, sensor_type, config_entry)
+        self._display_name = display_name
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return self._display_name
+
+    @property
+    def native_value(self) -> StateType:
+        """Return energy in kWh."""
+        if not self.coordinator.data:
+            return None
+
+        value = self.coordinator.data.get(self._sensor_type)
+        if not isinstance(value, (int, float)):
+            return None
+
+        # ES.GetMode provides input/output energy in 0.1 Wh units.
+        if self._sensor_type in {"input_energy", "output_energy"}:
+            return cast(StateType, round(float(value) / 10000, 3))
+
+        # ES.GetStatus total_*_energy values are reported in Wh.
+        return cast(StateType, round(float(value) / 1000, 3))
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: MarstekConfigEntry,
@@ -359,6 +403,19 @@ async def async_setup_entry(
         MarstekPVSensor(coordinator, device_info, pv_channel, metric_type, config_entry)
         for pv_channel in range(1, 5)
         for metric_type in ("power", "voltage", "current", "state")
+    )
+    sensors.extend(
+        MarstekEnergySensor(
+            coordinator, device_info, sensor_type, display_name, config_entry
+        )
+        for sensor_type, display_name in (
+            ("total_pv_energy", "Total PV Energy"),
+            ("total_grid_output_energy", "Total Grid Output Energy"),
+            ("total_grid_input_energy", "Total Grid Input Energy"),
+            ("total_load_energy", "Total Load Energy"),
+            ("input_energy", "Input Energy"),
+            ("output_energy", "Output Energy"),
+        )
     )
 
     _LOGGER.info("Device %s sensors set up, total %d", device_ip, len(sensors))

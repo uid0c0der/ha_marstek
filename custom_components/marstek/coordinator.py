@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 import logging
 from typing import Any
 
@@ -116,6 +117,8 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device_status.get("device_mode"),
                 device_status.get("battery_status"),
             )
+            await self._augment_energy_status(device_status, current_ip)
+            self._normalize_pv_power_scaling(device_status)
             return device_status  # noqa: TRY300
         except (TimeoutError, OSError, ValueError) as err:
             # Connection failed - Scanner will detect IP changes and update config entry
@@ -128,6 +131,96 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             # Return previous data on error
             return self.data or {}
+
+    async def _augment_energy_status(
+        self, device_status: dict[str, Any], current_ip: str
+    ) -> None:
+        """Add energy counters from ES.GetStatus and raw ES.GetMode."""
+        request_timeout = 5.0
+
+        # ES.GetStatus exposes total_*_energy values (Wh)
+        try:
+            es_status_response = await self.udp_client.send_request(
+                json.dumps(
+                    {"id": 1, "method": "ES.GetStatus", "params": {"id": 0}},
+                    separators=(",", ":"),
+                ),
+                current_ip,
+                DEFAULT_UDP_PORT,
+                timeout=request_timeout,
+            )
+            es_status_result = es_status_response.get("result", {})
+            if isinstance(es_status_result, dict):
+                for key in (
+                    "total_pv_energy",
+                    "total_grid_output_energy",
+                    "total_grid_input_energy",
+                    "total_load_energy",
+                ):
+                    value = es_status_result.get(key)
+                    if isinstance(value, (int, float)):
+                        device_status[key] = value
+        except (TimeoutError, OSError, ValueError) as err:
+            _LOGGER.debug("ES.GetStatus failed for %s: %s", current_ip, err)
+
+        # Raw ES.GetMode contains input/output energy in 0.1 Wh scale.
+        try:
+            es_mode_response = await self.udp_client.send_request(
+                json.dumps(
+                    {"id": 1, "method": "ES.GetMode", "params": {"id": 0}},
+                    separators=(",", ":"),
+                ),
+                current_ip,
+                DEFAULT_UDP_PORT,
+                timeout=request_timeout,
+            )
+            es_mode_result = es_mode_response.get("result", {})
+            if isinstance(es_mode_result, dict):
+                for key in ("input_energy", "output_energy"):
+                    value = es_mode_result.get(key)
+                    if isinstance(value, (int, float)):
+                        device_status[key] = value
+        except (TimeoutError, OSError, ValueError) as err:
+            _LOGGER.debug("ES.GetMode energy fields failed for %s: %s", current_ip, err)
+
+    def _normalize_pv_power_scaling(self, device_status: dict[str, Any]) -> None:
+        """Normalize PV power units if payload appears to be deciwatts.
+
+        Some devices/firmwares appear to report PV power in deciwatts for
+        individual channels while voltage/current are still in V/A.
+        We detect this by comparing reported power against V * I.
+        """
+        for channel in range(1, 5):
+            power_key = f"pv{channel}_power"
+            voltage_key = f"pv{channel}_voltage"
+            current_key = f"pv{channel}_current"
+
+            power = device_status.get(power_key)
+            voltage = device_status.get(voltage_key)
+            current = device_status.get(current_key)
+
+            if not all(isinstance(v, (int, float)) for v in (power, voltage, current)):
+                continue
+
+            power_w = float(power)
+            expected_w = float(voltage) * float(current)
+            if expected_w <= 0:
+                continue
+
+            # If raw power is ~10x higher than V*I and dividing by 10 aligns,
+            # treat it as deciwatts and normalize to watts.
+            ratio = power_w / expected_w
+            if ratio > 5 and abs((power_w / 10) - expected_w) / expected_w < 0.35:
+                normalized = round(power_w / 10, 1)
+                _LOGGER.debug(
+                    "Normalized %s from %s to %s W (V=%s, I=%s)",
+                    power_key,
+                    power_w,
+                    normalized,
+                    voltage,
+                    current,
+                )
+                device_status[power_key] = normalized
 
     async def _async_config_entry_updated(
         self, hass: HomeAssistant, entry: ConfigEntry
