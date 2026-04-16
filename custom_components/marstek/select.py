@@ -55,6 +55,22 @@ def _build_mode_command(mode: str) -> str:
     return build_command(CMD_ES_SET_MODE, {"id": 0, "config": config})
 
 
+def _normalize_mode_option(mode: str) -> str | None:
+    """Normalize device mode strings to UI option values."""
+    normalized = mode.strip().upper()
+    if normalized == "AUTO":
+        return "Auto"
+    if normalized == "AI":
+        return "AI"
+    if normalized == "MANUAL":
+        return "Manual"
+    if normalized == "PASSIVE":
+        return "Passive"
+    if normalized in {"UPS", "UPS MODE"}:
+        return "Ups"
+    return None
+
+
 class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectEntity):
     """Select entity for Marstek mode."""
 
@@ -75,6 +91,7 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
         self._config_entry = config_entry
         self._optimistic_option: str | None = None
         self._apply_task: asyncio.Task | None = None
+        self._last_confirmed_option: str | None = None
 
         device_identifier = (
             device_info.get("ble_mac")
@@ -110,10 +127,13 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
             return self._optimistic_option
         mode = self.coordinator.data.get("device_mode") if self.coordinator.data else None
         if not isinstance(mode, str):
-            return None
-        if mode == "UPS":
-            return "Ups"
-        return mode if mode in MODE_OPTIONS else None
+            return self._last_confirmed_option
+        normalized = _normalize_mode_option(mode)
+        if normalized is not None:
+            self._last_confirmed_option = normalized
+            return normalized
+        # Keep last stable mode during transient "unknown"/empty responses.
+        return self._last_confirmed_option
 
     async def async_select_option(self, option: str) -> None:
         """Select mode option and send ES.SetMode in background."""
@@ -179,10 +199,13 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
 
         if not success and previous_option in MODE_OPTIONS:
             self._optimistic_option = previous_option
+            self._last_confirmed_option = previous_option
             self.async_write_ha_state()
         self._optimistic_option = None
         if not success:
             _LOGGER.warning("Failed to apply mode '%s' for device %s", option, host)
+        else:
+            self._last_confirmed_option = option
         await self.coordinator.async_request_refresh()
 
     async def _verify_mode(self, expected_option: str, host: str) -> bool:
