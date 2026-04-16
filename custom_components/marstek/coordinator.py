@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import asyncio
 import json
 import logging
 from typing import Any
@@ -137,18 +138,38 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Add energy counters from ES.GetStatus and raw ES.GetMode."""
         request_timeout = 5.0
+        retry_attempts = 2
+
+        async def _send_with_retry(
+            method: str, request_id: int
+        ) -> dict[str, Any] | None:
+            for attempt in range(1, retry_attempts + 1):
+                try:
+                    return await self.udp_client.send_request(
+                        json.dumps(
+                            {"id": request_id, "method": method, "params": {"id": 0}},
+                            separators=(",", ":"),
+                        ),
+                        current_ip,
+                        DEFAULT_UDP_PORT,
+                        timeout=request_timeout,
+                    )
+                except (TimeoutError, OSError, ValueError) as err:
+                    _LOGGER.debug(
+                        "%s failed for %s on attempt %d/%d: %s",
+                        method,
+                        current_ip,
+                        attempt,
+                        retry_attempts,
+                        err,
+                    )
+                    if attempt < retry_attempts:
+                        await asyncio.sleep(1.0)
+            return None
 
         # ES.GetStatus exposes total_*_energy values (Wh)
-        try:
-            es_status_response = await self.udp_client.send_request(
-                json.dumps(
-                    {"id": 1, "method": "ES.GetStatus", "params": {"id": 0}},
-                    separators=(",", ":"),
-                ),
-                current_ip,
-                DEFAULT_UDP_PORT,
-                timeout=request_timeout,
-            )
+        es_status_response = await _send_with_retry("ES.GetStatus", request_id=1001)
+        if isinstance(es_status_response, dict):
             es_status_result = es_status_response.get("result", {})
             if isinstance(es_status_result, dict):
                 for key in (
@@ -160,28 +181,19 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     value = es_status_result.get(key)
                     if isinstance(value, (int, float)):
                         device_status[key] = value
-        except (TimeoutError, OSError, ValueError) as err:
-            _LOGGER.debug("ES.GetStatus failed for %s: %s", current_ip, err)
+
+        # Give device a brief pause before next query.
+        await asyncio.sleep(1.0)
 
         # Raw ES.GetMode contains input/output energy in 0.1 Wh scale.
-        try:
-            es_mode_response = await self.udp_client.send_request(
-                json.dumps(
-                    {"id": 1, "method": "ES.GetMode", "params": {"id": 0}},
-                    separators=(",", ":"),
-                ),
-                current_ip,
-                DEFAULT_UDP_PORT,
-                timeout=request_timeout,
-            )
+        es_mode_response = await _send_with_retry("ES.GetMode", request_id=1002)
+        if isinstance(es_mode_response, dict):
             es_mode_result = es_mode_response.get("result", {})
             if isinstance(es_mode_result, dict):
                 for key in ("input_energy", "output_energy"):
                     value = es_mode_result.get(key)
                     if isinstance(value, (int, float)):
                         device_status[key] = value
-        except (TimeoutError, OSError, ValueError) as err:
-            _LOGGER.debug("ES.GetMode energy fields failed for %s: %s", current_ip, err)
 
     def _normalize_pv_power_scaling(self, device_status: dict[str, Any]) -> None:
         """Normalize PV power units if payload appears to be deciwatts.
