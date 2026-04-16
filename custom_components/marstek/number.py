@@ -65,6 +65,7 @@ class MarstekPassivePowerNumber(
         self._device_info = device_info
         self._config_entry = config_entry
         self._value = 100.0
+        self._apply_task: asyncio.Task | None = None
 
         device_identifier = (
             device_info.get("ble_mac")
@@ -110,7 +111,9 @@ class MarstekPassivePowerNumber(
         self.async_write_ha_state()
 
         if self.hass:
-            self.hass.async_create_task(
+            if self._apply_task and not self._apply_task.done():
+                self._apply_task.cancel()
+            self._apply_task = self.hass.async_create_task(
                 self._async_apply_value(new_value, old_value, host)
             )
 
@@ -144,7 +147,7 @@ class MarstekPassivePowerNumber(
                         err,
                     )
                     if attempt_idx >= len(RETRY_TIMEOUTS):
-                        raise
+                        break
                     jitter = 0.25 * attempt_idx
                     await asyncio.sleep(backoff_base * attempt_idx + jitter)
         finally:

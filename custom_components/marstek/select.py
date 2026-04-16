@@ -47,7 +47,7 @@ def _build_mode_command(mode: str) -> str:
     elif mode == "Passive":
         config = {"mode": "Passive", "passive_cfg": {"power": 100, "cd_time": 300}}
     else:
-        config = {"mode": "Ups", "ups_cfg": {"enable": 1}}
+        config = {"mode": "UPS", "ups_cfg": {"enable": 1}}
 
     return build_command(CMD_ES_SET_MODE, {"id": 0, "config": config})
 
@@ -71,6 +71,7 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
         self._device_info = device_info
         self._config_entry = config_entry
         self._optimistic_option: str | None = None
+        self._apply_task: asyncio.Task | None = None
 
         device_identifier = (
             device_info.get("ble_mac")
@@ -124,7 +125,11 @@ class MarstekModeSelect(CoordinatorEntity[MarstekDataUpdateCoordinator], SelectE
         self.async_write_ha_state()
 
         if self.hass:
-            self.hass.async_create_task(self._async_apply_mode(option, host))
+            if self._apply_task and not self._apply_task.done():
+                self._apply_task.cancel()
+            self._apply_task = self.hass.async_create_task(
+                self._async_apply_mode(option, host)
+            )
 
     async def _async_apply_mode(self, option: str, host: str) -> None:
         """Apply mode change with retries and rollback on failure."""
