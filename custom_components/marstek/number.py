@@ -73,10 +73,9 @@ class MarstekPassivePowerNumber(
             or device_info.get("wifi_mac")
             or device_info["ip"]
         )
-        device_ip = config_entry.data.get(CONF_HOST, device_info.get("ip", "Unknown"))
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_identifier)},
-            name=f"Marstek {device_info['device_type']} v{device_info['version']} ({device_ip})",
+            name=f"Marstek {device_info['device_type']}",
             manufacturer="Marstek",
             model=device_info["device_type"],
             sw_version=str(device_info["version"]),

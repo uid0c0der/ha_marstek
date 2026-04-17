@@ -24,6 +24,80 @@ _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
+def _normalize_mac(value: str | None) -> str:
+    """Normalize MAC-like strings for loose matching."""
+    if not isinstance(value, str):
+        return ""
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+async def _refresh_device_metadata_from_discovery(
+    hass: HomeAssistant,
+    entry: MarstekConfigEntry,
+    udp_client: MarstekUDPClient,
+) -> dict[str, Any]:
+    """Refresh config entry metadata from current discovery data.
+
+    This keeps firmware/version and related fields current even after OTA updates.
+    """
+    try:
+        devices = await udp_client.discover_devices(use_cache=False)
+    except (TimeoutError, OSError, ValueError) as err:
+        _LOGGER.debug("Metadata refresh via discovery failed: %s", err)
+        return entry.data
+
+    if not devices:
+        return entry.data
+
+    entry_ble = _normalize_mac(entry.data.get("ble_mac"))
+    entry_wifi = _normalize_mac(entry.data.get("wifi_mac"))
+    entry_mac = _normalize_mac(entry.data.get("mac"))
+    entry_ip = entry.data.get(CONF_HOST)
+
+    matched: dict[str, Any] | None = None
+    for device in devices:
+        device_ble = _normalize_mac(device.get("ble_mac"))
+        device_wifi = _normalize_mac(device.get("wifi_mac"))
+        device_mac = _normalize_mac(device.get("mac"))
+        device_ip = device.get("ip")
+
+        if entry_ble and device_ble and entry_ble == device_ble:
+            matched = device
+            break
+        if entry_wifi and device_wifi and entry_wifi == device_wifi:
+            matched = device
+            break
+        if entry_mac and device_mac and entry_mac == device_mac:
+            matched = device
+            break
+        if isinstance(entry_ip, str) and entry_ip and device_ip == entry_ip:
+            matched = device
+            break
+
+    if not matched:
+        return entry.data
+
+    updated_data = dict(entry.data)
+    changed = False
+    for key in ("version", "device_type", "wifi_name", "wifi_mac", "mac", "ble_mac"):
+        new_value = matched.get(key)
+        if new_value is None:
+            continue
+        if updated_data.get(key) != new_value:
+            updated_data[key] = new_value
+            changed = True
+
+    if changed:
+        hass.config_entries.async_update_entry(entry, data=updated_data)
+        _LOGGER.info(
+            "Updated Marstek metadata from discovery for %s (version=%s)",
+            entry.title,
+            updated_data.get("version"),
+        )
+
+    return updated_data
+
+
 @dataclass
 class MarstekRuntimeData:
     """Runtime data for Marstek integration."""
@@ -96,15 +170,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MarstekConfigEntry) -> b
             "Scanner will detect IP changes and update configuration automatically."
         ) from ex
 
+    # Refresh metadata from live discovery so firmware/version does not go stale.
+    entry_data = await _refresh_device_metadata_from_discovery(hass, entry, udp_client)
+
     # Use device info from config_entry (saved during config flow)
     device_info_dict = {
         "ip": stored_ip,
-        "mac": entry.data.get("mac", ""),
-        "device_type": entry.data.get("device_type", "Unknown"),
-        "version": entry.data.get("version", 0),
-        "wifi_name": entry.data.get("wifi_name", ""),
-        "wifi_mac": entry.data.get("wifi_mac", ""),
-        "ble_mac": entry.data.get("ble_mac", ""),
+        "mac": entry_data.get("mac", ""),
+        "device_type": entry_data.get("device_type", "Unknown"),
+        "version": entry_data.get("version", 0),
+        "wifi_name": entry_data.get("wifi_name", ""),
+        "wifi_mac": entry_data.get("wifi_mac", ""),
+        "ble_mac": entry_data.get("ble_mac", ""),
     }
 
     # Create coordinator in __init__.py (mik-laj feedback)
