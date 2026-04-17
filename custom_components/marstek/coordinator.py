@@ -349,25 +349,38 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             device_status[key] = best_scaled_value
 
         # Legacy quirk fallback observed on some Venus D firmwares:
-        # PV1 current can be stuck at 0 while PV1 power is returned in deciwatts.
-        # In that case interpret PV1 power as deciwatts directly.
+        # PV1 may be reported about 10x higher than other active channels.
+        # This check is intentionally independent from current/state values
+        # because those can be unreliable (often 0 for all channels).
         pv1_power = device_status.get("pv1_power")
-        pv1_current = device_status.get("pv1_current")
-        pv1_state = device_status.get("pv1_state")
-        if not (
-            isinstance(pv1_power, (int, float))
-            and isinstance(pv1_current, (int, float))
-            and isinstance(pv1_state, (int, float))
-        ):
+        if not isinstance(pv1_power, (int, float)) or float(pv1_power) <= 0:
             return
-        if not (pv1_power > 0 and pv1_current == 0 and int(pv1_state) == 1):
+
+        other_powers = [
+            float(device_status.get(f"pv{ch}_power"))
+            for ch in range(2, 5)
+            if isinstance(device_status.get(f"pv{ch}_power"), (int, float))
+            and float(device_status.get(f"pv{ch}_power")) > 0
+        ]
+        if len(other_powers) < 2:
+            return
+        baseline = sum(other_powers) / len(other_powers)
+        if baseline <= 0:
+            return
+
+        ratio = float(pv1_power) / baseline
+        # Require near factor-10 relation to avoid accidental correction.
+        if not (6.5 <= ratio <= 13.5):
             return
 
         normalized = round(float(pv1_power) / 10.0, 1)
         _LOGGER.debug(
-            "Normalized pv1_power from %s to %s W using PV1 deciwatt quirk rule",
+            "Normalized pv1_power from %s to %s W using PV1 10x outlier rule "
+            "(baseline=%.1f, ratio=%.2f)",
             pv1_power,
             normalized,
+            baseline,
+            ratio,
         )
         device_status["pv1_power"] = normalized
 
