@@ -79,8 +79,18 @@ async def _refresh_device_metadata_from_discovery(
 
     updated_data = dict(entry.data)
     changed = False
-    for key in ("version", "device_type", "wifi_name", "wifi_mac", "mac", "ble_mac"):
-        new_value = matched.get(key)
+
+    # Discovery payloads can vary by source/library version.
+    # Normalize to our config entry keys.
+    normalized_updates: dict[str, Any] = {
+        "version": matched.get("version", matched.get("ver", matched.get("firmware"))),
+        "device_type": matched.get("device_type", matched.get("device")),
+        "wifi_name": matched.get("wifi_name"),
+        "wifi_mac": matched.get("wifi_mac"),
+        "mac": matched.get("mac"),
+        "ble_mac": matched.get("ble_mac"),
+    }
+    for key, new_value in normalized_updates.items():
         if new_value is None:
             continue
         if updated_data.get(key) != new_value:
