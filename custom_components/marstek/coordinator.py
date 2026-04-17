@@ -244,6 +244,56 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 device_status[power_key] = normalized
 
+        # Fallback heuristic when current/voltage plausibility is unavailable:
+        # compare PV channel sum against ES.GetStatus aggregate pv_power.
+        aggregate_pv = device_status.get("pv_power")
+        if not isinstance(aggregate_pv, (int, float)):
+            return
+        aggregate_w = float(aggregate_pv)
+        if aggregate_w <= 0:
+            return
+
+        channel_powers: dict[int, float] = {}
+        for channel in range(1, 5):
+            value = device_status.get(f"pv{channel}_power")
+            if isinstance(value, (int, float)):
+                channel_powers[channel] = float(value)
+
+        if not channel_powers:
+            return
+
+        raw_sum = sum(channel_powers.values())
+        raw_error = abs(raw_sum - aggregate_w)
+
+        # Only attempt correction if channel sum is significantly larger than
+        # aggregate PV power, which indicates a likely factor-of-10 outlier.
+        if raw_sum <= aggregate_w * 2.0:
+            return
+
+        best_channel: int | None = None
+        best_scaled_value = 0.0
+        best_error = raw_error
+
+        for channel, value in channel_powers.items():
+            candidate_sum = raw_sum - value + (value / 10.0)
+            candidate_error = abs(candidate_sum - aggregate_w)
+            if candidate_error < best_error:
+                best_error = candidate_error
+                best_channel = channel
+                best_scaled_value = round(value / 10.0, 1)
+
+        # Require meaningful improvement to avoid accidental corrections.
+        if best_channel is not None and best_error < raw_error * 0.5:
+            key = f"pv{best_channel}_power"
+            _LOGGER.debug(
+                "Normalized %s from %s to %s W using aggregate pv_power=%s",
+                key,
+                device_status.get(key),
+                best_scaled_value,
+                aggregate_w,
+            )
+            device_status[key] = best_scaled_value
+
     async def _async_config_entry_updated(
         self, hass: HomeAssistant, entry: ConfigEntry
     ) -> None:
