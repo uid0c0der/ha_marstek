@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 from typing import Any
 
@@ -35,6 +36,7 @@ async def _refresh_device_metadata_from_discovery(
     hass: HomeAssistant,
     entry: MarstekConfigEntry,
     udp_client: MarstekUDPClient,
+    base_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Refresh config entry metadata from current discovery data.
 
@@ -44,15 +46,16 @@ async def _refresh_device_metadata_from_discovery(
         devices = await udp_client.discover_devices(use_cache=False)
     except (TimeoutError, OSError, ValueError) as err:
         _LOGGER.debug("Metadata refresh via discovery failed: %s", err)
-        return entry.data
+        return base_data or entry.data
 
     if not devices:
-        return entry.data
+        return base_data or entry.data
 
-    entry_ble = _normalize_mac(entry.data.get("ble_mac"))
-    entry_wifi = _normalize_mac(entry.data.get("wifi_mac"))
-    entry_mac = _normalize_mac(entry.data.get("mac"))
-    entry_ip = entry.data.get(CONF_HOST)
+    current_data = base_data or entry.data
+    entry_ble = _normalize_mac(current_data.get("ble_mac"))
+    entry_wifi = _normalize_mac(current_data.get("wifi_mac"))
+    entry_mac = _normalize_mac(current_data.get("mac"))
+    entry_ip = current_data.get(CONF_HOST)
 
     matched: dict[str, Any] | None = None
     for device in devices:
@@ -75,9 +78,9 @@ async def _refresh_device_metadata_from_discovery(
             break
 
     if not matched:
-        return entry.data
+        return current_data
 
-    updated_data = dict(entry.data)
+    updated_data = dict(current_data)
     changed = False
 
     # Discovery payloads can vary by source/library version.
@@ -105,6 +108,56 @@ async def _refresh_device_metadata_from_discovery(
             updated_data.get("version"),
         )
 
+    return updated_data
+
+
+async def _refresh_device_metadata_direct(
+    hass: HomeAssistant,
+    entry: MarstekConfigEntry,
+    udp_client: MarstekUDPClient,
+    device_ip: str,
+) -> dict[str, Any]:
+    """Refresh metadata via direct Marstek.GetDevice call to current IP."""
+    request = json.dumps(
+        {"id": 75, "method": "Marstek.GetDevice", "params": {"ble_mac": "0"}},
+        separators=(",", ":"),
+    )
+    try:
+        response = await udp_client.send_request(
+            request, device_ip, DEFAULT_UDP_PORT, timeout=4.0, quiet_on_timeout=True
+        )
+    except (TimeoutError, OSError, ValueError) as err:
+        _LOGGER.debug("Direct metadata refresh failed for %s: %s", device_ip, err)
+        return entry.data
+
+    result = response.get("result", {}) if isinstance(response, dict) else {}
+    if not isinstance(result, dict):
+        return entry.data
+
+    updated_data = dict(entry.data)
+    changed = False
+    normalized_updates: dict[str, Any] = {
+        "version": result.get("version", result.get("ver", result.get("firmware"))),
+        "device_type": result.get("device_type", result.get("device")),
+        "wifi_name": result.get("wifi_name"),
+        "wifi_mac": result.get("wifi_mac"),
+        "mac": result.get("mac"),
+        "ble_mac": result.get("ble_mac"),
+    }
+    for key, new_value in normalized_updates.items():
+        if new_value is None:
+            continue
+        if updated_data.get(key) != new_value:
+            updated_data[key] = new_value
+            changed = True
+
+    if changed:
+        hass.config_entries.async_update_entry(entry, data=updated_data)
+        _LOGGER.info(
+            "Updated Marstek metadata from direct query for %s (version=%s)",
+            entry.title,
+            updated_data.get("version"),
+        )
     return updated_data
 
 
@@ -180,8 +233,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MarstekConfigEntry) -> b
             "Scanner will detect IP changes and update configuration automatically."
         ) from ex
 
-    # Refresh metadata from live discovery so firmware/version does not go stale.
-    entry_data = await _refresh_device_metadata_from_discovery(hass, entry, udp_client)
+    # Refresh metadata directly first, then try discovery fallback.
+    entry_data = await _refresh_device_metadata_direct(
+        hass, entry, udp_client, stored_ip
+    )
+    entry_data = await _refresh_device_metadata_from_discovery(
+        hass, entry, udp_client, base_data=entry_data
+    )
 
     # Use device info from config_entry (saved during config flow)
     device_info_dict = {

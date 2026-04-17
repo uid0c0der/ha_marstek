@@ -474,6 +474,52 @@ class MarstekCapacitySensor(MarstekSensor):
         return None
 
 
+class MarstekBatteryStoredEnergySensor(MarstekSensor):
+    """Representation of current battery stored energy (derived)."""
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_icon = "mdi:battery-medium"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: MarstekDataUpdateCoordinator,
+        device_info: dict[str, Any],
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
+        """Initialize battery stored energy sensor."""
+        super().__init__(
+            coordinator, device_info, "battery_stored_energy", config_entry
+        )
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return "Battery Stored Energy"
+
+    @property
+    def native_value(self) -> StateType:
+        """Return current battery stored energy in kWh.
+
+        Derived from capacity in Wh and state of charge in %.
+        """
+        if not self.coordinator.data:
+            return None
+
+        capacity_wh = self.coordinator.data.get("bat_cap")
+        soc_percent = self.coordinator.data.get("battery_soc")
+        if not isinstance(capacity_wh, (int, float)) or not isinstance(
+            soc_percent, (int, float)
+        ):
+            return None
+
+        if capacity_wh < 0:
+            return None
+
+        stored_kwh = (float(capacity_wh) * float(soc_percent) / 100.0) / 1000.0
+        return cast(StateType, round(stored_kwh, 3))
+
+
 class MarstekCTStateSensor(MarstekSensor):
     """Representation of CT state sensor."""
 
@@ -546,6 +592,7 @@ async def async_setup_entry(
     sensors: list[MarstekSensor] = [
         MarstekBatterySensor(coordinator, device_info, config_entry),
         MarstekCapacitySensor(coordinator, device_info, config_entry),
+        MarstekBatteryStoredEnergySensor(coordinator, device_info, config_entry),
         MarstekPowerSensor(coordinator, device_info, config_entry),
         MarstekDeviceModeSensor(coordinator, device_info, config_entry),
         MarstekCTStateSensor(coordinator, device_info, config_entry),
