@@ -349,8 +349,8 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             device_status[key] = best_scaled_value
 
         # Legacy quirk fallback observed on some Venus D firmwares:
-        # PV1 power may be reported roughly 10x too high while other channels
-        # look reasonable and PV currents are reported as 0.
+        # PV1 current can be stuck at 0 while PV1 power is returned in deciwatts.
+        # In that case interpret PV1 power as deciwatts directly.
         pv1_power = device_status.get("pv1_power")
         pv1_current = device_status.get("pv1_current")
         pv1_state = device_status.get("pv1_state")
@@ -360,27 +360,16 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and isinstance(pv1_state, (int, float))
         ):
             return
-        if not (pv1_power > 100 and pv1_current == 0 and int(pv1_state) == 1):
+        if not (pv1_power > 0 and pv1_current == 0 and int(pv1_state) == 1):
             return
 
-        other_powers = [
-            float(device_status.get(f"pv{ch}_power"))
-            for ch in range(2, 5)
-            if isinstance(device_status.get(f"pv{ch}_power"), (int, float))
-        ]
-        if not other_powers:
-            return
-        avg_other = sum(other_powers) / len(other_powers)
-        if avg_other <= 0:
-            return
-        if float(pv1_power) / avg_other >= 5:
-            normalized = round(float(pv1_power) / 10.0, 1)
-            _LOGGER.debug(
-                "Normalized pv1_power from %s to %s W using PV1 outlier heuristic",
-                pv1_power,
-                normalized,
-            )
-            device_status["pv1_power"] = normalized
+        normalized = round(float(pv1_power) / 10.0, 1)
+        _LOGGER.debug(
+            "Normalized pv1_power from %s to %s W using PV1 deciwatt quirk rule",
+            pv1_power,
+            normalized,
+        )
+        device_status["pv1_power"] = normalized
 
     def _restore_previous_pv_if_missing(self, device_status: dict[str, Any]) -> None:
         """Keep previous PV snapshot when PV.GetStatus likely failed.
