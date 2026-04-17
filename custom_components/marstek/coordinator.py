@@ -110,6 +110,13 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 error_msg = f"No valid data received from device at {current_ip}"
                 # Raise will be caught by outer except block
                 raise TimeoutError(error_msg) from None  # noqa: TRY301
+
+            if self._is_suspicious_zero_snapshot(device_status):
+                _LOGGER.warning(
+                    "Detected transient zero/default snapshot from %s; keeping previous values",
+                    current_ip,
+                )
+                raise TimeoutError("Transient zero/default snapshot detected") from None
             _LOGGER.debug(
                 "Device %s poll done: SOC %s%%, Power %sW, Mode %s, Status %s",
                 current_ip,
@@ -118,7 +125,9 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 device_status.get("device_mode"),
                 device_status.get("battery_status"),
             )
+            self._restore_previous_pv_if_missing(device_status)
             await self._augment_energy_status(device_status, current_ip)
+            self._carry_forward_missing_snapshot_values(device_status)
             self._normalize_pv_power_scaling(device_status)
             return device_status  # noqa: TRY300
         except (TimeoutError, OSError, ValueError) as err:
@@ -204,6 +213,51 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     value = es_mode_result.get(key)
                     if isinstance(value, (int, float)):
                         device_status[key] = value
+
+    def _carry_forward_missing_snapshot_values(
+        self, device_status: dict[str, Any]
+    ) -> None:
+        """Keep last known values when optional API calls miss fields.
+
+        `get_device_status` can succeed while follow-up calls (`ES.GetStatus`,
+        `ES.GetMode`) intermittently timeout. Without this, entities derived from
+        those payloads flip to `unknown` for one cycle.
+        """
+        previous = self.data or {}
+        if not previous:
+            return
+
+        sticky_keys = (
+            "bat_cap",
+            "pv_power",
+            "total_pv_energy",
+            "total_grid_output_energy",
+            "total_grid_input_energy",
+            "total_load_energy",
+            "input_energy",
+            "output_energy",
+            "ct_state",
+            "a_power",
+            "b_power",
+            "c_power",
+            "total_power",
+        )
+
+        restored_keys: list[str] = []
+        for key in sticky_keys:
+            if key in device_status:
+                continue
+            previous_value = previous.get(key)
+            if isinstance(previous_value, (int, float)):
+                device_status[key] = previous_value
+                restored_keys.append(key)
+
+        if restored_keys:
+            _LOGGER.debug(
+                "Restored %d missing transient keys from previous snapshot: %s",
+                len(restored_keys),
+                ", ".join(restored_keys),
+            )
 
     def _normalize_pv_power_scaling(self, device_status: dict[str, Any]) -> None:
         """Normalize PV power units if payload appears to be deciwatts.
@@ -293,6 +347,129 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 aggregate_w,
             )
             device_status[key] = best_scaled_value
+
+        # Legacy quirk fallback observed on some Venus D firmwares:
+        # PV1 power may be reported roughly 10x too high while other channels
+        # look reasonable and PV currents are reported as 0.
+        pv1_power = device_status.get("pv1_power")
+        pv1_current = device_status.get("pv1_current")
+        pv1_state = device_status.get("pv1_state")
+        if not (
+            isinstance(pv1_power, (int, float))
+            and isinstance(pv1_current, (int, float))
+            and isinstance(pv1_state, (int, float))
+        ):
+            return
+        if not (pv1_power > 100 and pv1_current == 0 and int(pv1_state) == 1):
+            return
+
+        other_powers = [
+            float(device_status.get(f"pv{ch}_power"))
+            for ch in range(2, 5)
+            if isinstance(device_status.get(f"pv{ch}_power"), (int, float))
+        ]
+        if not other_powers:
+            return
+        avg_other = sum(other_powers) / len(other_powers)
+        if avg_other <= 0:
+            return
+        if float(pv1_power) / avg_other >= 5:
+            normalized = round(float(pv1_power) / 10.0, 1)
+            _LOGGER.debug(
+                "Normalized pv1_power from %s to %s W using PV1 outlier heuristic",
+                pv1_power,
+                normalized,
+            )
+            device_status["pv1_power"] = normalized
+
+    def _restore_previous_pv_if_missing(self, device_status: dict[str, Any]) -> None:
+        """Keep previous PV snapshot when PV.GetStatus likely failed.
+
+        py-marstek returns all-zero PV defaults when PV.GetStatus fails.
+        To avoid short spikes to zero, reuse previous PV values in that case.
+        """
+        previous = self.data or {}
+        if not previous:
+            return
+
+        pv_keys = [
+            f"pv{ch}_{metric}"
+            for ch in range(1, 5)
+            for metric in ("power", "voltage", "current", "state")
+        ]
+        # Strong failure indicator: all PV voltages are zero in a single update.
+        current_voltages = [
+            device_status.get(f"pv{ch}_voltage", 0)
+            for ch in range(1, 5)
+            if isinstance(device_status.get(f"pv{ch}_voltage"), (int, float))
+        ]
+        if not current_voltages or not all(v == 0 for v in current_voltages):
+            return
+
+        previous_voltages = [
+            previous.get(f"pv{ch}_voltage", 0)
+            for ch in range(1, 5)
+            if isinstance(previous.get(f"pv{ch}_voltage"), (int, float))
+        ]
+        if not previous_voltages or not any(v > 0 for v in previous_voltages):
+            return
+
+        for key in pv_keys:
+            value = previous.get(key)
+            if isinstance(value, (int, float)):
+                device_status[key] = value
+        _LOGGER.debug("Restored previous PV snapshot after transient PV.GetStatus failure")
+
+    def _is_suspicious_zero_snapshot(self, device_status: dict[str, Any]) -> bool:
+        """Detect likely transient all-zero/default frame.
+
+        Some firmware/API states occasionally return a frame where most numeric
+        values are zero despite the device being active. In that case we keep
+        the previous valid coordinator data instead of publishing spikes to 0.
+        """
+        previous = self.data or {}
+        if not previous:
+            return False
+
+        numeric_keys = [
+            "battery_soc",
+            "battery_power",
+            "ongrid_power",
+            "offgrid_power",
+            "pv1_power",
+            "pv1_voltage",
+            "pv1_current",
+            "pv2_power",
+            "pv2_voltage",
+            "pv2_current",
+            "pv3_power",
+            "pv3_voltage",
+            "pv3_current",
+            "pv4_power",
+            "pv4_voltage",
+            "pv4_current",
+            "a_power",
+            "b_power",
+            "c_power",
+            "total_power",
+            "pv_power",
+        ]
+
+        current_values = [
+            float(device_status[k]) for k in numeric_keys if isinstance(device_status.get(k), (int, float))
+        ]
+        previous_values = [
+            float(previous[k]) for k in numeric_keys if isinstance(previous.get(k), (int, float))
+        ]
+        if len(current_values) < 8 or not previous_values:
+            return False
+
+        current_zero_ratio = sum(1 for v in current_values if v == 0) / len(current_values)
+        previous_nonzero_ratio = sum(1 for v in previous_values if v != 0) / len(previous_values)
+
+        # Treat as transient default frame when current frame is overwhelmingly zero
+        # while previous frame had meaningful non-zero data.
+        return current_zero_ratio >= 0.85 and previous_nonzero_ratio >= 0.25
 
     async def _async_config_entry_updated(
         self, hass: HomeAssistant, entry: ConfigEntry
